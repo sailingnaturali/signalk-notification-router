@@ -76,12 +76,7 @@ function buildEnvelope(n, position) {
 // prefix. Falls back to the original if every segment looks like an id.
 function shortPath(path) {
   const text = String(path);
-  const segments = text.split('.');
-  const kept = [];
-  for (const s of segments) {
-    if (s.length > 20) break;
-    kept.push(s);
-  }
+  const kept = text.split('.').filter((s) => s.length <= 20);
   return kept.join('.') || text;
 }
 

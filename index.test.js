@@ -101,7 +101,7 @@ test('buildEnvelope drops method — it is not part of the MQTT contract', () =>
 });
 
 test('shortPath drops id-length segments and keeps the meaning', () => {
-  assert.equal(shortPath('dsc.distress.316012345-2026-08-07T18:22:10.114Z'), 'dsc.distress');
+  assert.equal(shortPath('dsc.distress.316012345-2026-08-07T18:22:10'), 'dsc.distress');
   assert.equal(shortPath('navigation.anchor'), 'navigation.anchor');
   assert.equal(shortPath('mob.1'), 'mob.1');
 });
@@ -114,6 +114,14 @@ test('shortPath falls back when every segment is long', () => {
 test('shortPath never throws on null or a non-string', () => {
   assert.equal(typeof shortPath(null), 'string');
   assert.equal(typeof shortPath(42), 'string');
+});
+
+test('shortPath keeps short segments that follow a long one', () => {
+  // Filters every id-length segment out rather than truncating at the first
+  // one. Ported verbatim from the Python original, where this is a list
+  // comprehension over all segments — a break-at-first-long variant would
+  // return 'a' here and silently differ on any path shaped this way.
+  assert.equal(shortPath(`a.${'X'.repeat(21)}.b`), 'a.b');
 });
 
 test('renderSiren leads with state and path, then message and position', () => {
