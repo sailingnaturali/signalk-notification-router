@@ -203,50 +203,48 @@ module.exports = function (app, deps) {
 
   plugin.schema = {
     type: 'object',
-    required: ['topic'],
     properties: {
-      server: {
-        type: 'string',
-        title: 'ntfy server base URL',
-        default: 'https://ntfy.sh',
-      },
-      topic: {
-        type: 'string',
-        title: 'ntfy topic to publish alarms to',
-      },
-      token: {
-        type: 'string',
-        title: 'Access token (optional, for self-hosted/ACL servers)',
-        default: '',
-      },
       minState: {
         type: 'string',
         title: 'Minimum severity to forward',
+        description: 'Notifications below this never reach any output.',
         enum: ['alert', 'warn', 'alarm', 'emergency'],
-        default: 'warn',
+        default: 'alert',
       },
-      notifyOnClear: {
-        type: 'boolean',
-        title: 'Send a message when an alarm clears',
-        default: true,
+      mqttUrl: {
+        type: 'string',
+        title: 'MQTT broker URL',
+        description: 'Every forwardable notification is published here as a retained envelope. Leave blank to disable the MQTT output.',
+        default: 'mqtt://localhost:1883',
       },
-      includePosition: {
-        type: 'boolean',
-        title: 'Append vessel position to the message',
-        default: true,
+      mqttUser: { type: 'string', title: 'MQTT username (blank for anonymous)', default: '' },
+      mqttPassword: { type: 'string', title: 'MQTT password', format: 'password', default: '' },
+      topicPrefix: { type: 'string', title: 'MQTT topic prefix', default: 'naturali/alerts' },
+      telegramBotToken: {
+        type: 'string',
+        title: 'Telegram bot token (hard lane)',
+        description: 'alarm/emergency notifications carrying `sound` go straight to the Telegram Bot API — no gateway, no model, no MQTT.',
+        format: 'password',
+        default: '',
       },
-      healthCheckIntervalHours: {
+      telegramChatId: { type: 'string', title: 'Telegram chat id', default: '' },
+      hookUrl: {
+        type: 'string',
+        title: 'Agent webhook URL (soft lane)',
+        description: 'alert/warn notifications carrying `sound` are batched and POSTed here as {"message": "..."} to wake an agent turn. Also receives a context follow-up after every siren.',
+        default: '',
+      },
+      hookToken: { type: 'string', title: 'Agent webhook bearer token', format: 'password', default: '' },
+      coalesceSeconds: {
         type: 'number',
-        title: 'Delivery-path health check interval (hours)',
-        description:
-          'Periodically verify the ntfy token/server via /v1/account so a broken push path (expired token, ACL, outage) is caught before the next real alarm. 0 disables. Only runs when an access token is set.',
-        default: 24,
+        title: 'Soft-lane batching window (seconds)',
+        description: 'A burst of soft transitions becomes one agent turn. Measured from the first row in the batch. The hard lane never batches.',
+        default: 10,
       },
       failureThreshold: {
         type: 'number',
         title: 'Consecutive failures before raising a delivery-path alarm',
-        description:
-          'How many consecutive send/health-check failures before raising notifications.ntfyRelay.deliveryFailed (rides out transient network blips).',
+        description: 'Per lane. Raises notifications.notificationRouter.deliveryFailed.<lane> (visual only, so it cannot loop through the failing lane).',
         default: 3,
       },
     },

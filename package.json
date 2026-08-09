@@ -4,7 +4,8 @@
   "description": "Route Signal K notifications to MQTT, Telegram and an agent webhook — two push lanes with independent failure modes, honouring the notification's own `method`.",
   "main": "index.js",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "inject": "node scripts/inject-test-notification.js"
   },
   "keywords": [
     "signalk-node-server-plugin",

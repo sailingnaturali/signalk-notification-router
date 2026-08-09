@@ -4,17 +4,23 @@ All notable changes to `@sailingnaturali/signalk-notification-router` are docume
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0]
+## 0.1.0 — 2026-08-09
 
-### Changed
+Renamed from `@sailingnaturali/signalk-ntfy-relay`. The ntfy sender is gone;
+what remains is the part worth keeping — the `notifications.*` subscription,
+the edge-trigger, and the delivery-path health tracking.
 
-- Renamed from `signalk-ntfy-relay` to `signalk-notification-router` — a first
-  publish under the new package name, so the version resets to `0.1.0`. The
-  ntfy sender (`buildRequest`, `defaultSend`, the health-check probe, and
-  `scripts/ntfy-doctor.js`) is stripped; `notifications.*` subscription,
-  edge-triggering and severity ranking carry over unchanged. Tasks 2-6 of the
-  notification-router plan rebuild MQTT, Telegram and agent-webhook lanes on
-  top of this skeleton.
+- Three outputs: MQTT (retained envelopes), a Telegram siren for
+  `alarm`/`emergency`, and an agent webhook for `alert`/`warn`.
+- The notification's own `method` decides whether it pushes at all. No `sound`,
+  no push, at any severity — and no path allowlist anywhere.
+- The soft lane batches inside a coalesce window; the hard lane never does.
+- Delivery-path health is tracked per lane and raises a `visual`-only
+  notification so it cannot loop through the failing lane.
+- Replaces the `notifications-mqtt` Python sidecar, which polled REST every 5 s
+  and hand-rolled the flattening and edge-triggering this gets from the platform.
+
+— history below is from the old @sailingnaturali/signalk-ntfy-relay package name —
 
 ## [0.2.0]
 
