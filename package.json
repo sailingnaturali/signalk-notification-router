@@ -1,6 +1,6 @@
 {
   "name": "@sailingnaturali/signalk-notification-router",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Route Signal K notifications to MQTT, Telegram and an agent webhook — two push lanes with independent failure modes, honouring the notification's own `method`.",
   "main": "index.js",
   "scripts": {

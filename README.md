@@ -25,6 +25,15 @@ lane.**
 | Telegram siren | `alarm`/`emergency` **with `sound` in `method`** | the internet only |
 | Agent webhook | `alert`/`warn` with `sound`, plus a context follow-up after every siren | the gateway and the model behind it |
 
+Some gateways need more than `{"message": "..."}` to actually deliver the
+reply — the message alone can complete an agent turn and then drop it on the
+floor. Set `hookBodyExtra` to a JSON object and it's merged into the POST body
+alongside `message` (which always wins on a key collision). Against the
+OpenClaw gateway, for example, the delivery target is a body field, not
+implied by the URL: `{"deliver":true,"channel":"telegram","to":"<chatId>"}`.
+This plugin doesn't know or care what your gateway calls its fields — it just
+merges what you give it.
+
 A Signal K notification's `method` array is the publisher saying how it wants to
 be surfaced. `["visual"]` means *display this, do not sound it*. A publisher
 that does not ask for `sound` reaches MQTT and stops — at any severity. That is
@@ -63,6 +72,7 @@ All fields optional; a lane with no credentials idles and logs why at startup.
 | `topicPrefix` | `naturali/alerts` | |
 | `telegramBotToken` / `telegramChatId` | — | Hard lane |
 | `hookUrl` / `hookToken` | — | Soft lane; POSTs `{"message": "..."}` with a bearer token |
+| `hookBodyExtra` | — | Optional JSON object merged into that POST body, `message` always wins |
 | `coalesceSeconds` | `10` | Soft-lane batching window |
 | `failureThreshold` | `3` | Per lane |
 

@@ -155,17 +155,34 @@ async function sendTelegram(text, opts) {
   if (!res.ok) throw new Error(`telegram sendMessage failed: HTTP ${res.status}`);
 }
 
+// Parse the operator's extra-body JSON. Never throws: a malformed value must
+// not take down the soft lane, and plugin.start already logged it loudly at
+// configuration time. Anything that is not a JSON object is ignored.
+function parseHookExtra(raw) {
+  if (!raw) return {};
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
 // Soft lane. Wakes an agent turn via the OpenClaw gateway hooks endpoint.
 // Returns on admission (up to ~15 s), not on completion.
 async function postHook(message, opts) {
   const doFetch = opts.fetch || fetch;
+  // Whatever the operator's webhook consumer needs beyond the message —
+  // routing, delivery targets, model overrides. Kept as opaque JSON so this
+  // plugin stays agnostic about which agent gateway is on the other end.
+  // `message` is spread last so extra JSON can never clobber it.
   const res = await doFetch(opts.hookUrl, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${opts.hookToken}`,
     },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ ...parseHookExtra(opts.hookBodyExtra), message }),
     signal: AbortSignal.timeout(20000),
   });
   if (!res.ok) throw new Error(`hook POST failed: HTTP ${res.status}`);
@@ -235,6 +252,12 @@ module.exports = function (app, deps) {
         default: '',
       },
       hookToken: { type: 'string', title: 'Agent webhook bearer token', format: 'password', default: '' },
+      hookBodyExtra: {
+        type: 'string',
+        title: 'Extra JSON merged into the webhook body',
+        description: 'Optional JSON object merged into the POST body alongside `message`, for whatever your agent gateway needs to route and deliver the reply. For OpenClaw: {"deliver":true,"channel":"telegram","to":"<chatId>"} — without a delivery target its hook runs complete the agent turn and then fail to deliver. `message` always wins over anything set here.',
+        default: '',
+      },
       coalesceSeconds: {
         type: 'number',
         title: 'Soft-lane batching window (seconds)',
@@ -468,6 +491,15 @@ module.exports = function (app, deps) {
     if (!currentOptions.hookUrl || !currentOptions.hookToken) {
       app.error('no agent hook URL/token — the soft lane will NOT deliver');
     }
+    if (currentOptions.hookBodyExtra) {
+      const parsed = parseHookExtra(currentOptions.hookBodyExtra);
+      if (!Object.keys(parsed).length) {
+        app.error(
+          'hookBodyExtra is set but is not a JSON object — it will be ignored. ' +
+          'Expected something like {"deliver":true,"channel":"telegram","to":"123456"}'
+        );
+      }
+    }
     if (!currentOptions.mqttUrl) {
       app.error('no MQTT broker URL — nothing will reach naturali/alerts/#');
     } else {
@@ -502,4 +534,4 @@ module.exports = function (app, deps) {
 };
 
 // Pure helpers, hung off the factory for unit tests.
-module.exports._internal = { rank, isActive, shouldForward, classify, buildEnvelope, shortPath, renderSiren, renderFollowupPrompt, renderAgentPrompt, sendTelegram, postHook, connectMqtt };
+module.exports._internal = { rank, isActive, shouldForward, classify, buildEnvelope, shortPath, renderSiren, renderFollowupPrompt, renderAgentPrompt, sendTelegram, postHook, parseHookExtra, connectMqtt };

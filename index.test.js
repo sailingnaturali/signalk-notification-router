@@ -178,7 +178,7 @@ test('renderAgentPrompt survives rows with no message', () => {
   assert.match(renderAgentPrompt([{ path: 'x.y', state: 'warn' }]), /x\.y/);
 });
 
-const { sendTelegram, postHook } = createPlugin._internal;
+const { sendTelegram, postHook, parseHookExtra } = createPlugin._internal;
 
 function fakeFetch(record, response) {
   return async (url, init) => {
@@ -237,6 +237,56 @@ test('postHook throws on a non-2xx so the lane is recorded as failed', async () 
       fetch: fakeFetch([], { ok: false, status: 503 }),
     })
   );
+});
+
+test('postHook merges hookBodyExtra into the body', async () => {
+  const calls = [];
+  await postHook('investigate', {
+    hookUrl: 'http://h/agent',
+    hookToken: 'TOK',
+    hookBodyExtra: '{"deliver":true,"channel":"telegram","to":"5585762270"}',
+    fetch: fakeFetch(calls, { ok: true, status: 200 }),
+  });
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    deliver: true, channel: 'telegram', to: '5585762270', message: 'investigate',
+  });
+});
+
+test('hookBodyExtra cannot clobber the message', async () => {
+  const calls = [];
+  await postHook('the real message', {
+    hookUrl: 'http://h/agent', hookToken: 't',
+    hookBodyExtra: '{"message":"hijacked"}',
+    fetch: fakeFetch(calls, { ok: true, status: 200 }),
+  });
+  assert.equal(JSON.parse(calls[0].init.body).message, 'the real message');
+});
+
+test('malformed hookBodyExtra is ignored rather than killing the lane', async () => {
+  const calls = [];
+  await postHook('investigate', {
+    hookUrl: 'http://h/agent', hookToken: 't',
+    hookBodyExtra: 'not json{',
+    fetch: fakeFetch(calls, { ok: true, status: 200 }),
+  });
+  assert.deepEqual(JSON.parse(calls[0].init.body), { message: 'investigate' });
+});
+
+test('a non-object hookBodyExtra is ignored', () => {
+  assert.deepEqual(parseHookExtra('[1,2]'), {});
+  assert.deepEqual(parseHookExtra('"a string"'), {});
+  assert.deepEqual(parseHookExtra('null'), {});
+  assert.deepEqual(parseHookExtra(''), {});
+  assert.deepEqual(parseHookExtra(undefined), {});
+});
+
+test('absent hookBodyExtra leaves the body as just the message', async () => {
+  const calls = [];
+  await postHook('investigate', {
+    hookUrl: 'http://h/agent', hookToken: 't',
+    fetch: fakeFetch(calls, { ok: true, status: 200 }),
+  });
+  assert.deepEqual(JSON.parse(calls[0].init.body), { message: 'investigate' });
 });
 
 test('sendTelegram never leaks the bot token when fetch itself rejects', async () => {

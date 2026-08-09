@@ -4,6 +4,17 @@ All notable changes to `@sailingnaturali/signalk-notification-router` are docume
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 1.1.0 — 2026-08-09
+
+- Added `hookBodyExtra`: an optional JSON object merged into the soft-lane
+  webhook POST body alongside `message` (`message` always wins on a key
+  collision). Some agent gateways need routing/delivery fields in the body,
+  not just a message — without one, the hook endpoint can return 200, run the
+  agent turn, and then silently fail to deliver the reply. The plugin stays
+  gateway-agnostic: it merges whatever opaque JSON the operator supplies and
+  never learns a specific gateway's field names. A malformed value is logged
+  once at startup and otherwise ignored rather than taking down the lane.
+
 ## 1.0.0 — 2026-08-09
 
 Renamed from `@sailingnaturali/signalk-ntfy-relay`. Version starts at 1.0.0 because the
