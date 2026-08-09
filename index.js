@@ -255,6 +255,9 @@ module.exports = function (app, deps) {
   let unsubscribes = [];
   let lastState = new Map();
   let currentOptions = {};
+  let pendingSoft = [];     // soft-lane rows waiting for the coalesce window
+  let flushTimer = null;
+  let mqttClient = null;
   const failures = new Map();   // lane -> consecutive failure count
   const raised = new Set();     // lanes currently carrying a deliveryFailed alarm
   let failureThreshold = 3;
@@ -313,30 +316,176 @@ module.exports = function (app, deps) {
     return v && typeof v.latitude === 'number' ? v : undefined;
   }
 
-  // Task 5 replaces this with the real routing. Kept as a stub so the
-  // subscribe wiring below has something to call while the ntfy sender is
-  // gone and the router is not yet built.
-  function onDelta() {}
+  // The window runs from the OLDEST pending row: arm once when the buffer goes
+  // non-empty, never re-arm while one is in flight. A steady trickle of
+  // transitions would otherwise reset the timer forever and never flush.
+  // (This is what replaced the Python coalesce() — the timer IS the rule.)
+  function armFlush() {
+    if (flushTimer) return;
+    const ms = (currentOptions.coalesceSeconds ?? 10) * 1000;
+    flushTimer = setTimeout(flushSoft, ms);
+    if (flushTimer.unref) flushTimer.unref();
+  }
+
+  function flushSoft() {
+    flushTimer = null;
+    if (!pendingSoft.length) return;   // emptied by the I6 filter below
+    const batch = pendingSoft;
+    pendingSoft = [];
+    let prompt;
+    try {
+      prompt = renderAgentPrompt(batch);
+    } catch (e) {
+      app.error(`routing error rendering the soft batch: ${e.message}`);
+      return;
+    }
+    deliver('hook', () => senders.postHook(prompt, currentOptions));
+  }
+
+  // Route newly-active notification rows.
+  //
+  // Hard lane fires per-row immediately and never coalesces — deduplication is
+  // a comfort feature, a missed alarm is not. Soft lane batches.
+  //
+  // Deliveries are fire-and-forget (see deliver), so a wedged gateway cannot
+  // serialize a later row's siren behind an earlier row's hook timeout.
+  function route(rows) {
+    const hardEnvs = [];
+    for (const row of rows) {
+      try {
+        const lane = classify(row.state, row.method);
+        if (lane === 'hard') hardEnvs.push(buildEnvelope(row, position()));
+        else if (lane === 'soft') pendingSoft.push(row);
+      } catch (e) {
+        app.error(`routing error for ${row.path}: ${e.message}`);
+      }
+    }
+
+    for (const env of hardEnvs) {
+      let text;
+      try {
+        text = renderSiren(env);
+      } catch (e) {
+        app.error(`routing error rendering the siren for ${env.path}: ${e.message}`);
+        continue;
+      }
+      deliver('telegram', () => senders.sendTelegram(text, currentOptions));
+    }
+    for (const env of hardEnvs) {
+      let prompt;
+      try {
+        prompt = renderFollowupPrompt(env);
+      } catch (e) {
+        app.error(`routing error rendering the follow-up for ${env.path}: ${e.message}`);
+        continue;
+      }
+      deliver('hook', () => senders.postHook(prompt, currentOptions));
+    }
+
+    // I6: a path that just fired hard must not also flush a stale soft prompt —
+    // the siren already told the Captain, at the newer and correct severity.
+    // Filter the whole buffer, not just the new rows: a path can appear twice
+    // in one delta batch (a warn and an alarm), so the warn may be sitting in
+    // either place. flushSoft() no-ops on an empty buffer, so a timer already
+    // armed needs no cancelling.
+    if (hardEnvs.length) {
+      const hardPaths = new Set(hardEnvs.map((e) => e.path));
+      pendingSoft = pendingSoft.filter((r) => !hardPaths.has(r.path));
+    }
+    if (pendingSoft.length) armFlush();
+  }
+
+  function publishMqtt(topic, envelope) {
+    if (!mqttClient) return;
+    mqttClient.publish(topic, JSON.stringify(envelope), { qos: 1, retain: true }, (err) =>
+      recordResult('mqtt', !err)
+    );
+  }
+
+  function onDelta(delta) {
+    const minState = currentOptions.minState || 'alert';
+    const prefix = currentOptions.topicPrefix || 'naturali/alerts';
+    const newlyActive = [];
+
+    for (const u of delta.updates || []) {
+      for (const v of u.values || []) {
+        if (!v.path || !v.path.startsWith('notifications.')) continue;
+        const path = v.path.slice('notifications.'.length);
+        // Never route our own delivery-path alarms back out — they must not
+        // loop through the very lane that is failing.
+        if (path.startsWith(SELF_PREFIX)) continue;
+
+        const value = v.value || {};
+        const state = value.state;
+        const prev = lastState.get(path);
+        if (state === prev) continue;          // edge-trigger: act on change only
+        lastState.set(path, state);
+
+        try {
+          if (shouldForward(state, minState)) {
+            const row = {
+              path,
+              state,
+              message: value.message,
+              timestamp: value.timestamp,
+              method: value.method,
+            };
+            publishMqtt(`${prefix}/${path}`, buildEnvelope(row, position()));
+            newlyActive.push(row);
+          } else if (shouldForward(prev, minState)) {
+            // Was being forwarded, no longer is. Gated on the PREVIOUS state
+            // having been forwardable, not merely active: otherwise a path that
+            // never published an active envelope gets a retained `normal` on a
+            // topic that never existed.
+            //
+            // Cleared alarms publish to MQTT only — they never page and never
+            // wake the agent.
+            publishMqtt(`${prefix}/${path}`, {
+              path, state: 'normal', message: 'cleared', timestamp: null,
+            });
+          }
+        } catch (e) {
+          app.error(`notification error for ${path}: ${e.message}`);
+        }
+      }
+    }
+
+    if (newlyActive.length) route(newlyActive);
+  }
 
   plugin.start = function (options) {
-    options = options || {};
+    currentOptions = options || {};
     lastState = new Map();
-    currentOptions = options;
-    failureThreshold = options.failureThreshold > 0 ? options.failureThreshold : 3;
+    pendingSoft = [];
     failures.clear();
     raised.clear();
+    failureThreshold = currentOptions.failureThreshold > 0 ? currentOptions.failureThreshold : 3;
+
+    // A blank token and an expired one both fail silently, so a deploy that
+    // forgets a field looks healthy and pages nobody. Say so loudly at start —
+    // but keep running: a router with one broken lane is still worth having.
+    if (!currentOptions.telegramBotToken || !currentOptions.telegramChatId) {
+      app.error('no Telegram bot token/chat id — the hard lane (siren) will NOT deliver');
+    }
+    if (!currentOptions.hookUrl || !currentOptions.hookToken) {
+      app.error('no agent hook URL/token — the soft lane will NOT deliver');
+    }
+    if (!currentOptions.mqttUrl) {
+      app.error('no MQTT broker URL — nothing will reach naturali/alerts/#');
+    } else {
+      mqttClient = senders.connectMqtt(currentOptions);
+      if (mqttClient.on) mqttClient.on('error', (e) => app.error(`mqtt: ${e.message}`));
+    }
+
     app.subscriptionmanager.subscribe(
-      {
-        context: 'vessels.self',
-        subscribe: [{ path: 'notifications.*', policy: 'instant' }],
-      },
+      { context: 'vessels.self', subscribe: [{ path: 'notifications.*', policy: 'instant' }] },
       unsubscribes,
       (err) => app.error(err),
       (delta) => {
         try {
-          onDelta(delta, options);
+          onDelta(delta);
         } catch (e) {
-          app.error(`signalk-ntfy-relay: ${e.message}`);
+          app.error(`signalk-notification-router: ${e.message}`);
         }
       }
     );
@@ -346,6 +495,9 @@ module.exports = function (app, deps) {
     unsubscribes.forEach((f) => f());
     unsubscribes = [];
     lastState = new Map();
+    pendingSoft = [];
+    if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
+    if (mqttClient) { mqttClient.end(); mqttClient = null; }
   };
 
   return plugin;
