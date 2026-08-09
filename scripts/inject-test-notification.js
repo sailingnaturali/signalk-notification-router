@@ -14,12 +14,27 @@
  *
  * Clear it by re-running with --state normal.
  */
+
+// Global WebSocket is Node 22+. The plugin itself must stay Node-20-compatible
+// for Cerbo GX, so this dev-only script falls back to the `ws` devDependency
+// rather than raising the package's engines floor.
+const WS = globalThis.WebSocket || require('ws');
+
 const args = Object.fromEntries(
   process.argv.slice(2).reduce((acc, a, i, all) => {
-    if (a.startsWith('--')) acc.push([a.slice(2), all[i + 1]]);
+    if (a.startsWith('--')) {
+      const v = all[i + 1];
+      acc.push([a.slice(2), v && !v.startsWith('--') ? v : undefined]);
+    }
     return acc;
   }, [])
 );
+
+const VALID_STATES = ['alert', 'warn', 'alarm', 'emergency', 'normal'];
+if (args.state && !VALID_STATES.includes(args.state)) {
+  console.error(`--state must be one of: ${VALID_STATES.join(', ')}`);
+  process.exit(1);
+}
 
 const host = args.host || 'localhost';
 const token = process.env.SIGNALK_TOKEN;
@@ -35,11 +50,17 @@ const value =
         timestamp: new Date().toISOString(),
       };
 
-const ws = new WebSocket(`ws://${host}:3000/signalk/v1/stream?subscribe=none`, {
+const ws = new WS(`ws://${host}:3000/signalk/v1/stream?subscribe=none`, {
   headers: { Authorization: `Bearer ${token}` },
 });
 
+const connectTimeout = setTimeout(() => {
+  console.error(`timed out connecting to ${host} after 10s`);
+  process.exit(1);
+}, 10000);
+
 ws.addEventListener('open', () => {
+  clearTimeout(connectTimeout);
   ws.send(JSON.stringify({
     context: 'vessels.self',
     updates: [{
