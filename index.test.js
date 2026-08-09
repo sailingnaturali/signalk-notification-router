@@ -483,6 +483,24 @@ test('a dead Telegram still lets the hook through, and vice versa', async () => 
   assert.equal(b.sent.telegram.length, 1);
 });
 
+test('a hung hook does not delay a later row\'s siren', async () => {
+  // The failure the hard lane exists to survive. If route ever awaited its
+  // deliveries, the second row's siren would be stuck behind the first
+  // row's never-resolving hook POST.
+  const app = fakeApp();
+  let releaseHook;
+  const { sent } = startPlugin(app, {
+    postHook: () => new Promise((resolve) => { releaseHook = resolve; }),
+  });
+  app.emit([
+    { path: 'notifications.a', value: { state: 'alarm', timestamp: 't', method: SOUND } },
+    { path: 'notifications.b', value: { state: 'emergency', timestamp: 't', method: SOUND } },
+  ]);
+  await settle();
+  assert.equal(sent.telegram.length, 2);   // both sirens out while the hook hangs
+  releaseHook();
+});
+
 test('N consecutive Telegram failures raise a visual-only deliveryFailed alarm', async () => {
   const app = fakeApp();
   startPlugin(app, { sendTelegram: async () => { throw new Error('down'); } }, { failureThreshold: 2 });
@@ -528,6 +546,17 @@ test('stop() clears state so a restart does not replay', async () => {
   const { plugin, sent } = startPlugin(app);
   app.emit([{ path: 'notifications.a', value: { state: 'alarm', timestamp: 't', method: SOUND } }]);
   await settle();
-  plugin.stop();
   assert.equal(sent.telegram.length, 1);
+
+  plugin.stop();
+  plugin.start({
+    minState: 'alert', coalesceSeconds: 10, topicPrefix: 'naturali/alerts',
+    mqttUrl: 'mqtt://localhost:1883', telegramBotToken: 't', telegramChatId: 'c',
+    hookUrl: 'http://h/agent', hookToken: 'k',
+  });
+  // lastState was cleared, so the same notification is new again and sirens
+  // once more — exactly once. A leaked subscription or timer would double it.
+  app.emit([{ path: 'notifications.a', value: { state: 'alarm', timestamp: 't', method: SOUND } }]);
+  await settle();
+  assert.equal(sent.telegram.length, 2);
 });
