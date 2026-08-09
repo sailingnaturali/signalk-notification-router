@@ -101,7 +101,12 @@ test('buildEnvelope drops method — it is not part of the MQTT contract', () =>
 });
 
 test('shortPath drops id-length segments and keeps the meaning', () => {
-  assert.equal(shortPath('dsc.distress.316012345-2026-08-07T18:22:10'), 'dsc.distress');
+  // The real DSC path shape, milliseconds included. The timestamped id
+  // segment is dropped, but the trailing millisecond fragment ('114Z') is
+  // under the 20-char threshold and survives — so the siren reads
+  // 'dsc.distress.114Z'. Verified identical in the Python original; this
+  // test documents the quirk rather than hiding it behind a trimmed input.
+  assert.equal(shortPath('dsc.distress.316012345-2026-08-07T18:22:10.114Z'), 'dsc.distress.114Z');
   assert.equal(shortPath('navigation.anchor'), 'navigation.anchor');
   assert.equal(shortPath('mob.1'), 'mob.1');
 });
