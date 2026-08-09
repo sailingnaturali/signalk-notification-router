@@ -47,6 +47,84 @@ function classify(state, method) {
   return null;
 }
 
+// The MQTT envelope. FROZEN CONTRACT — Poseidon and Home Assistant parse this
+// off naturali/alerts/<path>. Key order matches the Python original, and every
+// optional key is `?? null` rather than left undefined, because JSON.stringify
+// drops undefined keys and the consumers expect the key to be present.
+function buildEnvelope(n, position) {
+  const env = {
+    path: n.path,
+    state: n.state,
+    message: n.message ?? null,
+    timestamp: n.timestamp ?? null,
+  };
+  if (
+    position &&
+    typeof position.latitude === 'number' &&
+    typeof position.longitude === 'number'
+  ) {
+    env.position = { latitude: position.latitude, longitude: position.longitude };
+  }
+  return env;
+}
+
+// Human-readable form of a SignalK notification path.
+//
+// Instance ids — uuids, timestamped DSC keys — mean nothing to someone reading
+// a phone at 3am, and on a narrow screen they push the actual message out of
+// view. Drop any segment long enough to be an id and keep the meaningful
+// prefix. Falls back to the original if every segment looks like an id.
+function shortPath(path) {
+  const text = String(path);
+  const segments = text.split('.');
+  const kept = [];
+  for (const s of segments) {
+    if (s.length > 20) break;
+    kept.push(s);
+  }
+  return kept.join('.') || text;
+}
+
+// Hard-lane Telegram text. No model touches this.
+//
+// It may be the only message that ever arrives — if the gateway or the model
+// API is down, the follow-up never comes — so it has to stand alone.
+function renderSiren(env) {
+  const lines = [`⚠ ${String(env.state).toUpperCase()} — ${shortPath(env.path)}`];
+  if (env.message) lines.push(String(env.message));
+  const pos = env.position;
+  if (pos) lines.push(`${pos.latitude.toFixed(5)}, ${pos.longitude.toFixed(5)}`);
+  return lines.join('\n');
+}
+
+// Hard-lane agent prompt: the Captain has ALREADY been paged.
+function renderFollowupPrompt(env) {
+  return (
+    `A ${env.state} notification on ${env.path} has already been sent to the ` +
+    `Captain directly: "${env.message || env.path}". ` +
+    'Do not repeat it. Read the vessel and send ONE short follow-up with the ' +
+    'context that makes it actionable — depth, wind, position, trend, ' +
+    'nearby hazards, whatever is relevant to this alarm. Numbers with units. ' +
+    'If nothing useful can be added, say so in one line.'
+  );
+}
+
+// Soft-lane agent prompt: a batch of changed notifications, unannounced.
+function renderAgentPrompt(rows) {
+  const listing = rows
+    .map((r) => `- ${r.path} = ${r.state}` + (r.message ? `: ${r.message}` : ''))
+    .join('\n');
+  return (
+    'SignalK notifications changed. The Captain has NOT been told yet:\n' +
+    `${listing}\n\n` +
+    'Read the vessel to see what is going on — notifications at ' +
+    'http://localhost:3000/signalk/v1/api/vessels/self/notifications, plus ' +
+    'battery SOC, depth below keel, wind and tank levels if relevant. Send ' +
+    'the Captain ONE concise heads-up (1-3 sentences), most important first, ' +
+    'numbers with units.'
+  );
+}
+
 module.exports = function (app, deps) {
   const plugin = {
     id: 'signalk-notification-router',
@@ -193,4 +271,4 @@ module.exports = function (app, deps) {
 };
 
 // Pure helpers, hung off the factory for unit tests.
-module.exports._internal = { rank, isActive, shouldForward, classify };
+module.exports._internal = { rank, isActive, shouldForward, classify, buildEnvelope, shortPath, renderSiren, renderFollowupPrompt, renderAgentPrompt };
