@@ -1,12 +1,19 @@
 /*
- * signalk-ntfy-relay — relay SignalK notifications to ntfy.
+ * signalk-notification-router — route SignalK notifications to MQTT, Telegram
+ * and an agent webhook.
  *
- * Watches notifications.* in-process, edge-triggers on state change, and POSTs
- * active alarms (>= a configurable severity) to an ntfy topic via Node's
- * built-in https/http. Zero runtime dependencies, so it mounts read-only.
+ * Watches notifications.* in-process and edge-triggers on state change. Three
+ * outputs with deliberately independent failure modes: every forwardable
+ * notification goes to MQTT; alarm/emergency sirens straight to the Telegram
+ * Bot API with no gateway and no model in the path; alert/warn wake an agent
+ * turn via a webhook. The notification's own `method` decides whether it
+ * pushes at all — no `sound`, no push, at any severity.
  *
- * The factory takes an optional second arg `deps` so tests can inject a fake
- * `send`; SignalK calls it with just (app), using the real network sender.
+ * Ported from infrastructure/pi5-signalk/notifications-mqtt/forward.py, which
+ * polled REST on a 5 s timer and hand-rolled all of the above.
+ *
+ * The factory takes an optional second arg `deps` so tests can inject fake
+ * senders; SignalK calls it with just (app).
  */
 const SEVERITY = { nominal: 0, normal: 1, alert: 2, warn: 3, alarm: 4, emergency: 5 };
 const INACTIVE = new Set(['nominal', 'normal']);
@@ -21,123 +28,18 @@ function shouldForward(state, minState) {
   return isActive(state) && rank(state) >= rank(minState);
 }
 
-const PRIORITY = { emergency: '5', alarm: '4', warn: '3', alert: '2' };
-const TAGS = {
-  emergency: 'sos',
-  alarm: 'rotating_light',
-  warn: 'warning',
-  alert: 'information_source',
-};
-
-// Inactive (cleared) states get the min-priority "resolved" treatment.
-function priorityFor(state) {
-  return isActive(state) ? (PRIORITY[state] || '3') : '1';
-}
-function tagsFor(state) {
-  return isActive(state) ? (TAGS[state] || 'warning') : 'white_check_mark';
-}
-
-// HTTP header values must be a single line. The notification path and state
-// are in-process data, but another plugin (or replayed/injected delta) could
-// put a CR/LF in a path; left raw it would either smuggle extra response
-// headers into the ntfy request or trip Node's ERR_INVALID_CHAR and silently
-// drop the alarm push. Collapse control runs to a space and cap the length so
-// a pathological path can't bloat the request line.
-function headerSafe(value, max = 256) {
-  return String(value)
-    .replace(/[\x00-\x1f\x7f]+/g, ' ')
-    .trim()
-    .slice(0, max);
-}
-
-// Compose the ntfy HTTP request (pure — no I/O). Returns {url, headers, body}.
-function buildRequest(n, position, options) {
-  const base = (options.server || 'https://ntfy.sh').replace(/\/+$/, '');
-  // Encode the topic so a stray space/slash can't break the path or smuggle in
-  // extra path segments (ntfy topics are [A-Za-z0-9_-], but be defensive).
-  const url = `${base}/${encodeURIComponent(options.topic)}`;
-  const headers = {
-    'Content-Type': 'text/plain; charset=utf-8',
-    Title: headerSafe(`${String(n.state).toUpperCase()}: ${n.path}`),
-    Priority: priorityFor(n.state),
-    Tags: tagsFor(n.state),
-  };
-  if (options.token) headers.Authorization = `Bearer ${options.token}`;
-  let body = n.message || n.path;
-  if (
-    options.includePosition !== false &&
-    position &&
-    typeof position.latitude === 'number' &&
-    typeof position.longitude === 'number'
-  ) {
-    body += `\n@ ${position.latitude.toFixed(5)}, ${position.longitude.toFixed(5)}`;
-  }
-  return { url, headers, body };
-}
-
-const https = require('https');
-const http = require('http');
-const { URL } = require('url');
-
-// A network I/O boundary. Fire-and-forget POST to ntfy; never throws — any
-// failure is logged via app.error so one bad push can't stall other alarms.
-// `onResult(ok)` reports the outcome to the delivery-path health tracker.
-function defaultSend({ url, headers, body }, app, onResult) {
-  const report = (ok) => { if (onResult) onResult(ok); };
-  try {
-    const u = new URL(url);
-    const lib = u.protocol === 'http:' ? http : https;
-    const req = lib.request(u, { method: 'POST', headers }, (res) => {
-      res.resume(); // drain
-      const ok = res.statusCode < 300;
-      if (!ok) app.error(`ntfy responded ${res.statusCode}`);
-      report(ok);
-    });
-    req.on('error', (e) => { app.error(`ntfy post failed: ${e.message}`); report(false); });
-    req.setTimeout(5000, () => req.destroy(new Error('ntfy timeout')));
-    req.write(body);
-    req.end();
-  } catch (e) {
-    app.error(`ntfy send error: ${e.message}`);
-    report(false);
-  }
-}
-
-// Read-only auth/reachability probe: GET {server}/v1/account. `cb(ok, status)`.
-// Lets the plugin catch an expired/revoked token (or an unreachable server)
-// proactively, before a real alarm needs the path. Never throws.
-function defaultCheckAccount({ server, token }, app, cb) {
-  try {
-    const base = (server || 'https://ntfy.sh').replace(/\/+$/, '');
-    const u = new URL(`${base}/v1/account`);
-    const lib = u.protocol === 'http:' ? http : https;
-    const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    const req = lib.request(u, { method: 'GET', headers }, (res) => {
-      res.resume();
-      cb(res.statusCode >= 200 && res.statusCode < 300, res.statusCode);
-    });
-    req.on('error', (e) => { app.error(`ntfy account check failed: ${e.message}`); cb(false); });
-    req.setTimeout(5000, () => req.destroy(new Error('ntfy account check timeout')));
-    req.end();
-  } catch (e) {
-    app.error(`ntfy account check error: ${e.message}`);
-    cb(false);
-  }
-}
-
 module.exports = function (app, deps) {
-  const send = (deps && deps.send) || defaultSend;
-  const checkAccount = (deps && deps.checkAccount) || defaultCheckAccount;
   const plugin = {
-    id: 'signalk-ntfy-relay',
-    name: 'ntfy notification relay',
-    description: 'Relay SignalK notifications (alarms) to an ntfy topic.',
+    id: 'signalk-notification-router',
+    name: 'Notification Router',
+    description: 'Route Signal K notifications to MQTT, Telegram and an agent webhook.',
   };
 
-  // The plugin's own health notification — surfaces on the dashboard/voice
-  // (channels independent of the phone push that may be down). Never forwarded
-  // to ntfy (see onDelta), so it can't loop through the failing path.
-  const DELIVERY_FAILED_PATH = 'notifications.ntfyRelay.deliveryFailed';
+  // Our own delivery-path alarms live under this prefix. They surface on the
+  // dashboard and voice — channels independent of whichever push lane is down —
+  // and are never routed back out (see onDelta), so they cannot loop through
+  // the failing path.
+  const SELF_PREFIX = 'notificationRouter.';
 
   plugin.schema = {
     type: 'object',
@@ -196,7 +98,6 @@ module.exports = function (app, deps) {
   let failureThreshold = 3;
   let consecutiveFailures = 0;
   let deliveryFailedRaised = false;
-  let healthTimer = null;
 
   function setDeliveryFailed(active, detail) {
     app.handleMessage(plugin.id, {
@@ -226,16 +127,6 @@ module.exports = function (app, deps) {
       setDeliveryFailed(true, detail);
     }
   }
-
-  // Proactive probe. No token → nothing to auth-check (unreserved topics publish
-  // anonymously); the reactive send path still covers connection failures.
-  function runHealthCheck() {
-    if (!currentOptions.token) return;
-    checkAccount({ server: currentOptions.server, token: currentOptions.token }, app, (ok, status) => {
-      recordResult(ok, ok ? undefined : `account check ${status || 'error'}`);
-    });
-  }
-  plugin._runHealthCheck = runHealthCheck;
 
   function position() {
     const node = app.getSelfPath('navigation.position');
@@ -283,16 +174,6 @@ module.exports = function (app, deps) {
     failureThreshold = options.failureThreshold > 0 ? options.failureThreshold : 3;
     consecutiveFailures = 0;
     deliveryFailedRaised = false;
-    if (!options.topic) {
-      app.error('signalk-ntfy-relay: no ntfy topic configured — idling');
-      return;
-    }
-    const intervalHours = options.healthCheckIntervalHours ?? 24;
-    if (intervalHours > 0 && options.token) {
-      runHealthCheck(); // one probe at startup
-      healthTimer = setInterval(runHealthCheck, intervalHours * 60 * 60 * 1000);
-      if (healthTimer.unref) healthTimer.unref(); // don't hold the process open
-    }
     app.subscriptionmanager.subscribe(
       {
         context: 'vessels.self',
@@ -314,11 +195,10 @@ module.exports = function (app, deps) {
     unsubscribes.forEach((f) => f());
     unsubscribes = [];
     lastState = new Map();
-    if (healthTimer) { clearInterval(healthTimer); healthTimer = null; }
   };
 
   return plugin;
 };
 
 // Pure helpers, hung off the factory for unit tests.
-module.exports._internal = { rank, isActive, shouldForward, priorityFor, tagsFor, buildRequest, headerSafe };
+module.exports._internal = { rank, isActive, shouldForward };

@@ -1,8 +1,20 @@
 # Changelog
 
-All notable changes to `@sailingnaturali/signalk-ntfy-relay` are documented here.
+All notable changes to `@sailingnaturali/signalk-notification-router` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [0.1.0]
+
+### Changed
+
+- Renamed from `signalk-ntfy-relay` to `signalk-notification-router` — a first
+  publish under the new package name, so the version resets to `0.1.0`. The
+  ntfy sender (`buildRequest`, `defaultSend`, the health-check probe, and
+  `scripts/ntfy-doctor.js`) is stripped; `notifications.*` subscription,
+  edge-triggering and severity ranking carry over unchanged. Tasks 2-6 of the
+  notification-router plan rebuild MQTT, Telegram and agent-webhook lanes on
+  top of this skeleton.
 
 ## [0.2.0]
 

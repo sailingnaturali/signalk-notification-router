@@ -1,39 +1,38 @@
 {
-  "name": "@sailingnaturali/signalk-ntfy-relay",
-  "version": "0.2.0",
-  "description": "Relay SignalK notifications (alarms) to an ntfy topic — zero dependencies, edge-triggered, severity-aware.",
+  "name": "@sailingnaturali/signalk-notification-router",
+  "version": "0.1.0",
+  "description": "Route Signal K notifications to MQTT, Telegram and an agent webhook — two push lanes with independent failure modes, honouring the notification's own `method`.",
   "main": "index.js",
   "scripts": {
-    "test": "node --test",
-    "ntfy-doctor": "node scripts/ntfy-doctor.js"
+    "test": "node --test"
   },
   "keywords": [
     "signalk-node-server-plugin",
     "signalk-category-notifications",
-    "ntfy",
     "notifications",
     "alarm",
+    "mqtt",
+    "telegram",
     "marine"
   ],
   "author": "Bryan Clark",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/sailingnaturali/signalk-ntfy-relay.git"
+    "url": "git+https://github.com/sailingnaturali/signalk-notification-router.git"
   },
-  "homepage": "https://github.com/sailingnaturali/signalk-ntfy-relay#readme",
+  "homepage": "https://github.com/sailingnaturali/signalk-notification-router#readme",
   "bugs": {
-    "url": "https://github.com/sailingnaturali/signalk-ntfy-relay/issues"
+    "url": "https://github.com/sailingnaturali/signalk-notification-router/issues"
   },
   "signalk": {
-    "displayName": "ntfy notification relay",
-    "screenshots": [
-      "./docs/screenshots/config.png"
-    ]
+    "displayName": "Notification Router"
+  },
+  "dependencies": {
+    "mqtt": "^5.10.1"
   },
   "files": [
-    "index.js",
-    "docs/screenshots/"
+    "index.js"
   ],
   "publishConfig": {
     "access": "public"
