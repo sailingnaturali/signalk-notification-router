@@ -7,6 +7,13 @@ Watches `notifications.*` in-process via the subscription manager and
 **edge-triggers**: it acts once when a notification changes state, not
 repeatedly while it persists.
 
+## Looking for ntfy?
+
+This plugin does not send to [ntfy](https://ntfy.sh) — it was renamed from
+`@sailingnaturali/signalk-ntfy-relay` and the ntfy sender was removed.
+[signalk-ntfy](https://github.com/Enand-lab/signalk-ntfy) (Apache-2.0) is actively
+developed and does that job, against ntfy.sh or a self-hosted server.
+
 ## The routing rule
 
 **`method` decides whether a notification pushes at all; `state` decides which

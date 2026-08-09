@@ -4,9 +4,11 @@ All notable changes to `@sailingnaturali/signalk-notification-router` are docume
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.1.0 — 2026-08-09
+## 1.0.0 — 2026-08-09
 
-Renamed from `@sailingnaturali/signalk-ntfy-relay`. The ntfy sender is gone;
+Renamed from `@sailingnaturali/signalk-ntfy-relay`. Version starts at 1.0.0 because the
+repo kept its old tags (v0.1.0–v0.2.0 belong to the ntfy relay) — 1.x is the first
+unambiguous line for this package. The ntfy sender is gone;
 what remains is the part worth keeping — the `notifications.*` subscription,
 the edge-trigger, and the delivery-path health tracking.
 
