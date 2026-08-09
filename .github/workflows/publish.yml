@@ -13,6 +13,10 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 24
-      # Zero dependencies — nothing to install; test then publish.
-      - run: node --test
+      # npm ci even though only `mqtt` is a runtime dep: a bare `node --test`
+      # here passed for years while this package had none, then broke the
+      # instant it took one on — and test.yml, which does run npm ci, stayed
+      # green and hid it. Install before testing, always.
+      - run: npm ci
+      - run: npm test
       - run: npm publish
