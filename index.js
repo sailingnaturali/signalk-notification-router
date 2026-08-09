@@ -101,7 +101,7 @@ module.exports = function (app, deps) {
 
   function setDeliveryFailed(active, detail) {
     app.handleMessage(plugin.id, {
-      updates: [{ values: [{ path: DELIVERY_FAILED_PATH, value: active
+      updates: [{ values: [{ path: `notifications.${SELF_PREFIX}deliveryFailed`, value: active
         ? {
             state: 'alert',
             method: ['visual'],
@@ -135,37 +135,10 @@ module.exports = function (app, deps) {
     return v && typeof v.latitude === 'number' ? v : undefined;
   }
 
-  function onDelta(delta, options) {
-    (delta.updates || []).forEach((u) =>
-      (u.values || []).forEach((v) => {
-        if (!v.path || !v.path.startsWith('notifications.')) return;
-        const state = v.value && v.value.state;
-        const path = v.path.slice('notifications.'.length);
-        // Never forward our own delivery-path alarm — it must not loop through
-        // the failing ntfy path (it surfaces via the dashboard/voice instead).
-        if (path.startsWith('ntfyRelay.')) return;
-        const prev = lastState.get(path);
-        if (state === prev) return; // edge-trigger: only act on change
-        lastState.set(path, state);
-        const min = options.minState || 'warn';
-        const message = (v.value && v.value.message) || undefined;
-        const onResult = (ok) => recordResult(ok, ok ? undefined : 'send failed');
-        if (shouldForward(state, min)) {
-          send(buildRequest({ path, state, message }, position(), options), app, onResult);
-        } else if (
-          !isActive(state) &&
-          isActive(prev) &&
-          options.notifyOnClear !== false
-        ) {
-          send(
-            buildRequest({ path, state: state || 'normal', message }, position(), options),
-            app,
-            onResult
-          );
-        }
-      })
-    );
-  }
+  // Task 5 replaces this with the real routing. Kept as a stub so the
+  // subscribe wiring below has something to call while the ntfy sender is
+  // gone and the router is not yet built.
+  function onDelta() {}
 
   plugin.start = function (options) {
     options = options || {};
