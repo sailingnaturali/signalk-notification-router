@@ -71,7 +71,7 @@ All fields optional; a lane with no credentials idles and logs why at startup.
 | `mqttUser` / `mqttPassword` | — | Blank user means anonymous |
 | `topicPrefix` | `naturali/alerts` | |
 | `telegramBotToken` / `telegramChatId` | — | Hard lane |
-| `hookUrl` / `hookToken` | — | Soft lane; POSTs `{"message": "..."}` with a bearer token |
+| `hookUrl` / `hookToken` | — | Soft lane; POSTs `{"message": "..."}` (plus anything set in `hookBodyExtra`) with a bearer token |
 | `hookBodyExtra` | — | Optional JSON object merged into that POST body, `message` always wins |
 | `coalesceSeconds` | `10` | Soft-lane batching window |
 | `failureThreshold` | `3` | Per lane |

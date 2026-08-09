@@ -248,14 +248,14 @@ module.exports = function (app, deps) {
       hookUrl: {
         type: 'string',
         title: 'Agent webhook URL (soft lane)',
-        description: 'alert/warn notifications carrying `sound` are batched and POSTed here as {"message": "..."} to wake an agent turn. Also receives a context follow-up after every siren.',
+        description: 'alert/warn notifications carrying `sound` are batched and POSTed here as {"message": "..."} (plus anything set in hookBodyExtra) to wake an agent turn. Also receives a context follow-up after every siren.',
         default: '',
       },
       hookToken: { type: 'string', title: 'Agent webhook bearer token', format: 'password', default: '' },
       hookBodyExtra: {
         type: 'string',
         title: 'Extra JSON merged into the webhook body',
-        description: 'Optional JSON object merged into the POST body alongside `message`, for whatever your agent gateway needs to route and deliver the reply. For OpenClaw: {"deliver":true,"channel":"telegram","to":"<chatId>"} — without a delivery target its hook runs complete the agent turn and then fail to deliver. `message` always wins over anything set here.',
+        description: 'Optional JSON object merged into the POST body alongside `message`, for whatever your agent gateway needs to route and deliver the reply. For OpenClaw: {"deliver":true,"channel":"telegram","to":"<chatId>"} — without a delivery target, its hook runs can complete the agent turn and then fail to deliver. `message` always wins over anything set here.',
         default: '',
       },
       coalesceSeconds: {
