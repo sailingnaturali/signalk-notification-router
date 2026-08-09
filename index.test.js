@@ -254,7 +254,7 @@ function fakeApp() {
   const handled = [];
   const errors = [];
   let handler = null;
-  return {
+  const api = {
     handled,
     errors,
     // Feed a delta into whatever the plugin subscribed with.
@@ -263,10 +263,12 @@ function fakeApp() {
     error: (e) => errors.push(String(e)),
     debug: () => {},
     getSelfPath: () => ({ value: { latitude: 48.76, longitude: -123.05 } }),
+    subscribeCalls: 0,
     subscriptionmanager: {
-      subscribe: (_sub, _unsubs, _onErr, onDelta) => { handler = onDelta; },
+      subscribe: (_sub, _unsubs, _onErr, onDelta) => { handler = onDelta; api.subscribeCalls += 1; },
     },
   };
+  return api;
 }
 
 function startPlugin(app, overrides = {}, options = {}) {
@@ -488,9 +490,9 @@ test('a hung hook does not delay a later row\'s siren', async () => {
   // deliveries, the second row's siren would be stuck behind the first
   // row's never-resolving hook POST.
   const app = fakeApp();
-  let releaseHook;
+  const releases = [];
   const { sent } = startPlugin(app, {
-    postHook: () => new Promise((resolve) => { releaseHook = resolve; }),
+    postHook: () => new Promise((resolve) => { releases.push(resolve); }),
   });
   app.emit([
     { path: 'notifications.a', value: { state: 'alarm', timestamp: 't', method: SOUND } },
@@ -498,7 +500,7 @@ test('a hung hook does not delay a later row\'s siren', async () => {
   ]);
   await settle();
   assert.equal(sent.telegram.length, 2);   // both sirens out while the hook hangs
-  releaseHook();
+  releases.forEach((r) => r());
 });
 
 test('N consecutive Telegram failures raise a visual-only deliveryFailed alarm', async () => {
@@ -554,6 +556,7 @@ test('a restart re-subscribes and treats a repeated notification as new', async 
     mqttUrl: 'mqtt://localhost:1883', telegramBotToken: 't', telegramChatId: 'c',
     hookUrl: 'http://h/agent', hookToken: 'k',
   });
+  assert.equal(app.subscribeCalls, 2);   // start() re-subscribed rather than relying on the stale handler
   // lastState was cleared, so the same notification is new again and sirens
   // once more — exactly once. A leaked subscription or timer would double it.
   app.emit([{ path: 'notifications.a', value: { state: 'alarm', timestamp: 't', method: SOUND } }]);
