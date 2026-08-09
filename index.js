@@ -18,6 +18,10 @@
 const SEVERITY = { nominal: 0, normal: 1, alert: 2, warn: 3, alarm: 4, emergency: 5 };
 const INACTIVE = new Set(['nominal', 'normal']);
 
+// Lane split. `state` picks the lane; `method` decides whether it pushes at all.
+const HARD = new Set(['alarm', 'emergency']);   // siren + agent follow-up
+const SOFT = new Set(['alert', 'warn']);        // agent turn only
+
 function rank(state) {
   return state in SEVERITY ? SEVERITY[state] : -1;
 }
@@ -26,6 +30,21 @@ function isActive(state) {
 }
 function shouldForward(state, minState) {
   return isActive(state) && rank(state) >= rank(minState);
+}
+
+// Which push lane this notification takes, or null for no push.
+//
+// SignalK's `method` array is the publisher declaring how it wants to be
+// surfaced: ["visual"] means display, do not sound. A publisher that does not
+// ask for sound never pages the Captain, whatever the severity — that is what
+// keeps blanket geofence warnings (signalk-restricted-areas) off the phone
+// without a path allowlist. Anything not an array is treated as "did not ask".
+function classify(state, method) {
+  if (state == null || INACTIVE.has(state) || !(state in SEVERITY)) return null;
+  if (!Array.isArray(method) || !method.includes('sound')) return null;
+  if (HARD.has(state)) return 'hard';
+  if (SOFT.has(state)) return 'soft';
+  return null;
 }
 
 module.exports = function (app, deps) {
@@ -174,4 +193,4 @@ module.exports = function (app, deps) {
 };
 
 // Pure helpers, hung off the factory for unit tests.
-module.exports._internal = { rank, isActive, shouldForward };
+module.exports._internal = { rank, isActive, shouldForward, classify };
