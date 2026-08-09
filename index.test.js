@@ -541,7 +541,7 @@ test('a broken row does not abort the rest of the batch', async () => {
   assert.ok(app.errors.length >= 1);
 });
 
-test('stop() clears state so a restart does not replay', async () => {
+test('a restart re-subscribes and treats a repeated notification as new', async () => {
   const app = fakeApp();
   const { plugin, sent } = startPlugin(app);
   app.emit([{ path: 'notifications.a', value: { state: 'alarm', timestamp: 't', method: SOUND } }]);
@@ -559,4 +559,21 @@ test('stop() clears state so a restart does not replay', async () => {
   app.emit([{ path: 'notifications.a', value: { state: 'alarm', timestamp: 't', method: SOUND } }]);
   await settle();
   assert.equal(sent.telegram.length, 2);
+});
+
+test('stop() cancels a pending soft batch', async (t) => {
+  // The real leak stop() prevents: a soft batch whose window is still open
+  // when the operator disables the plugin must not wake an agent turn
+  // afterwards. Both clearTimeout and the pendingSoft reset independently
+  // suppress this, so it takes losing both to regress — target the
+  // behaviour rather than either line.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const app = fakeApp();
+  const { plugin, sent } = startPlugin(app);
+  app.emit([{ path: 'notifications.tanks.blackWater.0', value: { state: 'warn', timestamp: 't', method: SOUND } }]);
+  await settle();
+  plugin.stop();
+  t.mock.timers.tick(60000);
+  await settle();
+  assert.deepEqual(sent.hook, []);
 });
