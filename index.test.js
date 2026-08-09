@@ -238,3 +238,14 @@ test('postHook throws on a non-2xx so the lane is recorded as failed', async () 
     })
   );
 });
+
+test('sendTelegram never leaks the bot token when fetch itself rejects', async () => {
+  const boom = async () => { throw new Error('connect ECONNREFUSED https://api.telegram.org/botSUPERSECRET123/sendMessage'); };
+  await assert.rejects(
+    () => sendTelegram('hello', { telegramBotToken: 'SUPERSECRET123', telegramChatId: '1', fetch: boom }),
+    (e) => {
+      assert.equal(e.message.includes('SUPERSECRET123'), false);
+      return true;
+    }
+  );
+});

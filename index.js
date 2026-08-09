@@ -129,15 +129,29 @@ function renderAgentPrompt(rows) {
 // written verbatim into the SignalK log. Status code only.
 async function sendTelegram(text, opts) {
   const doFetch = opts.fetch || fetch;
-  const res = await doFetch(
-    `https://api.telegram.org/bot${opts.telegramBotToken}/sendMessage`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ chat_id: opts.telegramChatId, text }),
-      signal: AbortSignal.timeout(10000),
-    }
-  );
+  let res;
+  try {
+    res = await doFetch(
+      `https://api.telegram.org/bot${opts.telegramBotToken}/sendMessage`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: opts.telegramChatId, text }),
+        signal: AbortSignal.timeout(10000),
+      }
+    );
+  } catch (e) {
+    // The bot token is in the request URL, so nothing derived from the
+    // transport error is safe to surface — a rejected fetch must not carry
+    // it into app.error() and from there into the on-disk log. Node does not
+    // currently put the URL in e.message, but that is undici's formatting
+    // choice, not a guarantee we should depend on.
+    throw new Error(
+      e.name === 'TimeoutError'
+        ? 'telegram sendMessage failed: timeout'
+        : 'telegram sendMessage failed: network error'
+    );
+  }
   if (!res.ok) throw new Error(`telegram sendMessage failed: HTTP ${res.status}`);
 }
 
@@ -309,6 +323,8 @@ module.exports = function (app, deps) {
     lastState = new Map();
     currentOptions = options;
     failureThreshold = options.failureThreshold > 0 ? options.failureThreshold : 3;
+    failures.clear();
+    raised.clear();
     app.subscriptionmanager.subscribe(
       {
         context: 'vessels.self',
