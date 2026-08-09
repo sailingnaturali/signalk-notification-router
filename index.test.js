@@ -177,3 +177,64 @@ test('renderAgentPrompt lists every row and says the Captain has NOT been told',
 test('renderAgentPrompt survives rows with no message', () => {
   assert.match(renderAgentPrompt([{ path: 'x.y', state: 'warn' }]), /x\.y/);
 });
+
+const { sendTelegram, postHook } = createPlugin._internal;
+
+function fakeFetch(record, response) {
+  return async (url, init) => {
+    record.push({ url, init });
+    return { ok: response.ok, status: response.status };
+  };
+}
+
+test('sendTelegram posts to the bot API with the chat id and text', async () => {
+  const calls = [];
+  await sendTelegram('hello', {
+    telegramBotToken: 'BOTTOKEN',
+    telegramChatId: '5585762270',
+    fetch: fakeFetch(calls, { ok: true, status: 200 }),
+  });
+  assert.equal(calls[0].url, 'https://api.telegram.org/botBOTTOKEN/sendMessage');
+  assert.deepEqual(JSON.parse(calls[0].init.body), {
+    chat_id: '5585762270',
+    text: 'hello',
+  });
+});
+
+test('sendTelegram error never leaks the bot token', async () => {
+  const calls = [];
+  await assert.rejects(
+    () => sendTelegram('hello', {
+      telegramBotToken: 'SUPERSECRET123',
+      telegramChatId: '1',
+      fetch: fakeFetch(calls, { ok: false, status: 401 }),
+    }),
+    (e) => {
+      assert.equal(e.message.includes('SUPERSECRET123'), false);
+      assert.match(e.message, /401/);
+      return true;
+    }
+  );
+});
+
+test('postHook sends the bearer token and the message', async () => {
+  const calls = [];
+  await postHook('investigate', {
+    hookUrl: 'http://127.0.0.1:18789/hooks-x/agent',
+    hookToken: 'TOK',
+    fetch: fakeFetch(calls, { ok: true, status: 200 }),
+  });
+  assert.equal(calls[0].url, 'http://127.0.0.1:18789/hooks-x/agent');
+  assert.equal(calls[0].init.headers.Authorization, 'Bearer TOK');
+  assert.deepEqual(JSON.parse(calls[0].init.body), { message: 'investigate' });
+});
+
+test('postHook throws on a non-2xx so the lane is recorded as failed', async () => {
+  await assert.rejects(() =>
+    postHook('x', {
+      hookUrl: 'http://h/agent',
+      hookToken: 't',
+      fetch: fakeFetch([], { ok: false, status: 503 }),
+    })
+  );
+});

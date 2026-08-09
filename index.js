@@ -15,6 +15,8 @@
  * The factory takes an optional second arg `deps` so tests can inject fake
  * senders; SignalK calls it with just (app).
  */
+const mqtt = require('mqtt');
+
 const SEVERITY = { nominal: 0, normal: 1, alert: 2, warn: 3, alarm: 4, emergency: 5 };
 const INACTIVE = new Set(['nominal', 'normal']);
 
@@ -120,7 +122,59 @@ function renderAgentPrompt(rows) {
   );
 }
 
+// Hard lane. Straight to the Telegram Bot API — no gateway, no model, no MQTT.
+//
+// Checks res.ok by hand rather than surfacing res.url or the response body:
+// the bot token is IN the request URL, and a thrown Error carrying it would be
+// written verbatim into the SignalK log. Status code only.
+async function sendTelegram(text, opts) {
+  const doFetch = opts.fetch || fetch;
+  const res = await doFetch(
+    `https://api.telegram.org/bot${opts.telegramBotToken}/sendMessage`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: opts.telegramChatId, text }),
+      signal: AbortSignal.timeout(10000),
+    }
+  );
+  if (!res.ok) throw new Error(`telegram sendMessage failed: HTTP ${res.status}`);
+}
+
+// Soft lane. Wakes an agent turn via the OpenClaw gateway hooks endpoint.
+// Returns on admission (up to ~15 s), not on completion.
+async function postHook(message, opts) {
+  const doFetch = opts.fetch || fetch;
+  const res = await doFetch(opts.hookUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${opts.hookToken}`,
+    },
+    body: JSON.stringify({ message }),
+    signal: AbortSignal.timeout(20000),
+  });
+  if (!res.ok) throw new Error(`hook POST failed: HTTP ${res.status}`);
+}
+
+// mqtt.js reconnects on its own and queues QoS-1 publishes while offline, so an
+// unreachable broker never blocks startup or the routing path — matching the
+// Python original's connect_async + best-effort publish.
+function connectMqtt(opts) {
+  return mqtt.connect(opts.mqttUrl, {
+    username: opts.mqttUser || undefined,
+    password: opts.mqttPassword || undefined,
+    reconnectPeriod: 5000,
+  });
+}
+
 module.exports = function (app, deps) {
+  const senders = {
+    sendTelegram: (deps && deps.sendTelegram) || sendTelegram,
+    postHook: (deps && deps.postHook) || postHook,
+    connectMqtt: (deps && deps.connectMqtt) || connectMqtt,
+  };
+
   const plugin = {
     id: 'signalk-notification-router',
     name: 'Notification Router',
@@ -187,37 +241,55 @@ module.exports = function (app, deps) {
   let unsubscribes = [];
   let lastState = new Map();
   let currentOptions = {};
+  const failures = new Map();   // lane -> consecutive failure count
+  const raised = new Set();     // lanes currently carrying a deliveryFailed alarm
   let failureThreshold = 3;
-  let consecutiveFailures = 0;
-  let deliveryFailedRaised = false;
 
-  function setDeliveryFailed(active, detail) {
+  // Per-lane, not global: MQTT going down must not raise "Telegram is failing".
+  // The alarm is method: ['visual'] so classify() can never push it, and
+  // onDelta skips SELF_PREFIX so it can never loop through the failing lane.
+  // It still surfaces on the dashboard and voice.
+  function setDeliveryFailed(lane, active) {
     app.handleMessage(plugin.id, {
-      updates: [{ values: [{ path: `notifications.${SELF_PREFIX}deliveryFailed`, value: active
-        ? {
-            state: 'alert',
-            method: ['visual'],
-            message: `ntfy delivery path failing${detail ? ` (${detail})` : ''} — alarms are not reaching the phone`,
-            timestamp: new Date().toISOString(),
-          }
-        : { state: 'normal', method: [], message: '' } }] }],
+      updates: [{ values: [{
+        path: `notifications.${SELF_PREFIX}deliveryFailed.${lane}`,
+        value: active
+          ? {
+              state: 'alert',
+              method: ['visual'],
+              message: `${lane} delivery path failing — notifications are not reaching it`,
+              timestamp: new Date().toISOString(),
+            }
+          : { state: 'normal', method: [], message: '' },
+      }] }],
     });
   }
 
-  // Shared by the reactive (per-send) and proactive (heartbeat) paths: a run of
-  // `failureThreshold` consecutive failures raises the delivery-path alarm; any
-  // success resets and clears it.
-  function recordResult(ok, detail) {
+  function recordResult(lane, ok) {
     if (ok) {
-      consecutiveFailures = 0;
-      if (deliveryFailedRaised) { deliveryFailedRaised = false; setDeliveryFailed(false); }
+      failures.set(lane, 0);
+      if (raised.has(lane)) { raised.delete(lane); setDeliveryFailed(lane, false); }
       return;
     }
-    consecutiveFailures += 1;
-    if (consecutiveFailures >= failureThreshold && !deliveryFailedRaised) {
-      deliveryFailedRaised = true;
-      setDeliveryFailed(true, detail);
+    const n = (failures.get(lane) || 0) + 1;
+    failures.set(lane, n);
+    if (n >= failureThreshold && !raised.has(lane)) {
+      raised.add(lane);
+      setDeliveryFailed(lane, true);
     }
+  }
+
+  // Fire-and-forget with the outcome fed to the health counter. Never awaited:
+  // a wedged gateway must not serialize a later row's siren behind an earlier
+  // row's 20 s hook timeout, and nothing downstream needs the result.
+  function deliver(lane, fn) {
+    Promise.resolve()
+      .then(fn)
+      .then(() => recordResult(lane, true))
+      .catch((e) => {
+        app.error(`delivery error on the ${lane} lane: ${e.message}`);
+        recordResult(lane, false);
+      });
   }
 
   function position() {
@@ -237,8 +309,6 @@ module.exports = function (app, deps) {
     lastState = new Map();
     currentOptions = options;
     failureThreshold = options.failureThreshold > 0 ? options.failureThreshold : 3;
-    consecutiveFailures = 0;
-    deliveryFailedRaised = false;
     app.subscriptionmanager.subscribe(
       {
         context: 'vessels.self',
@@ -266,4 +336,4 @@ module.exports = function (app, deps) {
 };
 
 // Pure helpers, hung off the factory for unit tests.
-module.exports._internal = { rank, isActive, shouldForward, classify, buildEnvelope, shortPath, renderSiren, renderFollowupPrompt, renderAgentPrompt };
+module.exports._internal = { rank, isActive, shouldForward, classify, buildEnvelope, shortPath, renderSiren, renderFollowupPrompt, renderAgentPrompt, sendTelegram, postHook, connectMqtt };
