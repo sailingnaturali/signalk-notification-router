@@ -57,8 +57,11 @@ transitions becomes one agent turn instead of six.
 A blank token and an expired one both fail silently, which is how a push path
 dies unnoticed. After `failureThreshold` consecutive failures on a lane, the
 plugin raises `notifications.notificationRouter.deliveryFailed.<lane>` — a
-`visual`-only notification, so it surfaces on your dashboard rather than
-attempting to page through the very lane that is down. Any success clears it.
+`visual`-only notification. It publishes to MQTT like any other forwardable
+notification (so it reaches whatever reads `naturali/alerts/#`, e.g. a voice
+agent or dashboard), but is never routed back out through the Telegram or
+webhook lanes — it can't attempt to page through the very lane that is down.
+Any success clears it.
 
 ## Config
 

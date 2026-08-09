@@ -168,6 +168,19 @@ function parseHookExtra(raw) {
   }
 }
 
+// Did `raw` parse as a JSON object (an empty `{}` counts)? Distinct from
+// "parseHookExtra returned no keys", which is also true for a deliberate
+// `{}` — this is used only for the startup warning, so a valid empty object
+// does not trip a spurious "is not a JSON object" error.
+function isJsonObject(raw) {
+  try {
+    const v = JSON.parse(raw);
+    return v != null && typeof v === 'object' && !Array.isArray(v);
+  } catch {
+    return false;
+  }
+}
+
 // Soft lane. Wakes an agent turn via the OpenClaw gateway hooks endpoint.
 // Returns on admission (up to ~15 s), not on completion.
 async function postHook(message, opts) {
@@ -176,15 +189,28 @@ async function postHook(message, opts) {
   // routing, delivery targets, model overrides. Kept as opaque JSON so this
   // plugin stays agnostic about which agent gateway is on the other end.
   // `message` is spread last so extra JSON can never clobber it.
-  const res = await doFetch(opts.hookUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${opts.hookToken}`,
-    },
-    body: JSON.stringify({ ...parseHookExtra(opts.hookBodyExtra), message }),
-    signal: AbortSignal.timeout(20000),
-  });
+  let res;
+  try {
+    res = await doFetch(opts.hookUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${opts.hookToken}`,
+      },
+      body: JSON.stringify({ ...parseHookExtra(opts.hookBodyExtra), message }),
+      signal: AbortSignal.timeout(20000),
+    });
+  } catch (e) {
+    // No secret is in the hook URL today (the bearer token is a header), but
+    // it carries a deliberately non-guessable gateway path — same reasoning
+    // as sendTelegram's catch: a rejected fetch must not carry undici's
+    // formatting of the URL into app.error() and from there into the log.
+    throw new Error(
+      e.name === 'TimeoutError'
+        ? 'hook POST failed: timeout'
+        : 'hook POST failed: network error'
+    );
+  }
   if (!res.ok) throw new Error(`hook POST failed: HTTP ${res.status}`);
 }
 
@@ -212,10 +238,11 @@ module.exports = function (app, deps) {
     description: 'Route Signal K notifications to MQTT, Telegram and an agent webhook.',
   };
 
-  // Our own delivery-path alarms live under this prefix. They surface on the
-  // dashboard and voice — channels independent of whichever push lane is down —
-  // and are never routed back out (see onDelta), so they cannot loop through
-  // the failing path.
+  // Our own delivery-path alarms live under this prefix. They still publish
+  // to MQTT — channels independent of whichever push lane is down, e.g. the
+  // dashboard and voice, read off it — but are never routed back out through
+  // the Telegram/webhook lanes (see onDelta), so they cannot loop through the
+  // failing path.
   const SELF_PREFIX = 'notificationRouter.';
 
   plugin.schema = {
@@ -285,8 +312,9 @@ module.exports = function (app, deps) {
 
   // Per-lane, not global: MQTT going down must not raise "Telegram is failing".
   // The alarm is method: ['visual'] so classify() can never push it, and
-  // onDelta skips SELF_PREFIX so it can never loop through the failing lane.
-  // It still surfaces on the dashboard and voice.
+  // onDelta only skips SELF_PREFIX for routing, not the MQTT publish, so it
+  // still surfaces on the dashboard and voice — and can never loop through
+  // the failing push lane.
   function setDeliveryFailed(lane, active) {
     app.handleMessage(plugin.id, {
       updates: [{ values: [{
@@ -327,7 +355,11 @@ module.exports = function (app, deps) {
       .catch((e) => {
         app.error(`delivery error on the ${lane} lane: ${e.message}`);
         recordResult(lane, false);
-      });
+      })
+      // app.error or recordResult (which fans out via app.handleMessage to
+      // every other plugin's subscribers) can itself throw — a lane failure
+      // must never become an unhandled rejection on the alarm path.
+      .catch(() => {});
   }
 
   function position() {
@@ -418,9 +450,23 @@ module.exports = function (app, deps) {
 
   function publishMqtt(topic, envelope) {
     if (!mqttClient) return;
-    mqttClient.publish(topic, JSON.stringify(envelope), { qos: 1, retain: true }, (err) =>
-      recordResult('mqtt', !err)
-    );
+    // mqtt.js only calls the publish callback on PUBACK, so an unreachable
+    // broker would otherwise record neither success nor failure — the health
+    // counter would sit silent through the exact outage it exists to report.
+    // Still publish: qos-1 messages queue and flush on reconnect.
+    if (mqttClient.connected === false) recordResult('mqtt', false);
+    mqttClient.publish(topic, JSON.stringify(envelope), { qos: 1, retain: true }, (err) => {
+      // mqtt.js invokes this directly, not through a promise chain, so an
+      // uncaught throw here (recordResult fans out via app.handleMessage to
+      // every other plugin's subscribers) would crash the process rather
+      // than just failing to record one delivery outcome. Best-effort log;
+      // a throw from app.error itself must not escape here either.
+      try {
+        recordResult('mqtt', !err);
+      } catch (e) {
+        try { app.error(`mqtt publish callback error: ${e.message}`); } catch {}
+      }
+    });
   }
 
   function onDelta(delta) {
@@ -432,9 +478,7 @@ module.exports = function (app, deps) {
       for (const v of u.values || []) {
         if (!v.path || !v.path.startsWith('notifications.')) continue;
         const path = v.path.slice('notifications.'.length);
-        // Never route our own delivery-path alarms back out — they must not
-        // loop through the very lane that is failing.
-        if (path.startsWith(SELF_PREFIX)) continue;
+        const isSelf = path.startsWith(SELF_PREFIX);
 
         const value = v.value || {};
         const state = value.state;
@@ -452,6 +496,14 @@ module.exports = function (app, deps) {
               method: value.method,
             };
             publishMqtt(`${prefix}/${path}`, buildEnvelope(row, position()));
+            // Our own delivery-path alarms still publish to MQTT (the only
+            // path from the notifications tree to voice/dashboard) but are
+            // never routed back out through classify/route — that would loop
+            // through the very lane that is failing. Safe: the notification
+            // carries method: ['visual'], so classify() can never assign it
+            // a lane anyway, and an MQTT failure cannot re-raise past the
+            // `raised` guard in recordResult.
+            if (isSelf) continue;
             newlyActive.push(row);
           } else if (shouldForward(prev, minState)) {
             // Was being forwarded, no longer is. Gated on the PREVIOUS state
@@ -461,9 +513,7 @@ module.exports = function (app, deps) {
             //
             // Cleared alarms publish to MQTT only — they never page and never
             // wake the agent.
-            publishMqtt(`${prefix}/${path}`, {
-              path, state: 'normal', message: 'cleared', timestamp: null,
-            });
+            publishMqtt(`${prefix}/${path}`, buildEnvelope({ path, state: 'normal', message: 'cleared', timestamp: null }));
           }
         } catch (e) {
           app.error(`notification error for ${path}: ${e.message}`);
@@ -475,11 +525,23 @@ module.exports = function (app, deps) {
   }
 
   plugin.start = function (options) {
+    // Self-guarding: SignalK always calls stop() before a re-start today, but
+    // unsubscribes is only reset in stop(). A start() without one first would
+    // leave the previous subscription live alongside the new one — every
+    // notification routed twice, a double siren.
+    plugin.stop();
     currentOptions = options || {};
     lastState = new Map();
     pendingSoft = [];
+    // Reset the consecutive-failure count — a stale streak from before the
+    // restart shouldn't count toward the new threshold. Do NOT clear
+    // `raised`: if a lane's alarm is currently active in the SignalK
+    // notifications tree, forgetting that here would mean the next success
+    // never calls setDeliveryFailed(lane, false) (recordResult only clears
+    // when raised.has(lane)), latching the tree at `alert` until the whole
+    // server restarts. `raised` is per-plugin-instance state; a real server
+    // restart clears it naturally, which is the only reset it needs.
     failures.clear();
-    raised.clear();
     failureThreshold = currentOptions.failureThreshold > 0 ? currentOptions.failureThreshold : 3;
 
     // A blank token and an expired one both fail silently, so a deploy that
@@ -491,14 +553,11 @@ module.exports = function (app, deps) {
     if (!currentOptions.hookUrl || !currentOptions.hookToken) {
       app.error('no agent hook URL/token — the soft lane will NOT deliver');
     }
-    if (currentOptions.hookBodyExtra) {
-      const parsed = parseHookExtra(currentOptions.hookBodyExtra);
-      if (!Object.keys(parsed).length) {
-        app.error(
-          'hookBodyExtra is set but is not a JSON object — it will be ignored. ' +
-          'Expected something like {"deliver":true,"channel":"telegram","to":"123456"}'
-        );
-      }
+    if (currentOptions.hookBodyExtra && !isJsonObject(currentOptions.hookBodyExtra)) {
+      app.error(
+        'hookBodyExtra is set but is not a JSON object — it will be ignored. ' +
+        'Expected something like {"deliver":true,"channel":"telegram","to":"123456"}'
+      );
     }
     if (!currentOptions.mqttUrl) {
       app.error('no MQTT broker URL — nothing will reach naturali/alerts/#');

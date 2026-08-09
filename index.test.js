@@ -191,12 +191,12 @@ test('sendTelegram posts to the bot API with the chat id and text', async () => 
   const calls = [];
   await sendTelegram('hello', {
     telegramBotToken: 'BOTTOKEN',
-    telegramChatId: '5585762270',
+    telegramChatId: '123456',
     fetch: fakeFetch(calls, { ok: true, status: 200 }),
   });
   assert.equal(calls[0].url, 'https://api.telegram.org/botBOTTOKEN/sendMessage');
   assert.deepEqual(JSON.parse(calls[0].init.body), {
-    chat_id: '5585762270',
+    chat_id: '123456',
     text: 'hello',
   });
 });
@@ -239,16 +239,39 @@ test('postHook throws on a non-2xx so the lane is recorded as failed', async () 
   );
 });
 
+test('postHook never leaks the gateway URL when fetch itself rejects (minor)', async () => {
+  const boom = async () => { throw new Error('connect ECONNREFUSED http://h/hooks-x1y2z3/agent'); };
+  await assert.rejects(
+    () => postHook('x', { hookUrl: 'http://h/hooks-x1y2z3/agent', hookToken: 't', fetch: boom }),
+    (e) => {
+      assert.equal(e.message.includes('hooks-x1y2z3'), false);
+      assert.match(e.message, /network error/);
+      return true;
+    }
+  );
+});
+
+test('postHook distinguishes a timeout from a network error (minor)', async () => {
+  const timeout = async () => { const e = new Error('timed out'); e.name = 'TimeoutError'; throw e; };
+  await assert.rejects(
+    () => postHook('x', { hookUrl: 'http://h/agent', hookToken: 't', fetch: timeout }),
+    (e) => {
+      assert.match(e.message, /timeout/);
+      return true;
+    }
+  );
+});
+
 test('postHook merges hookBodyExtra into the body', async () => {
   const calls = [];
   await postHook('investigate', {
     hookUrl: 'http://h/agent',
     hookToken: 'TOK',
-    hookBodyExtra: '{"deliver":true,"channel":"telegram","to":"5585762270"}',
+    hookBodyExtra: '{"deliver":true,"channel":"telegram","to":"123456"}',
     fetch: fakeFetch(calls, { ok: true, status: 200 }),
   });
   assert.deepEqual(JSON.parse(calls[0].init.body), {
-    deliver: true, channel: 'telegram', to: '5585762270', message: 'investigate',
+    deliver: true, channel: 'telegram', to: '123456', message: 'investigate',
   });
 });
 
@@ -303,19 +326,31 @@ test('sendTelegram never leaks the bot token when fetch itself rejects', async (
 function fakeApp() {
   const handled = [];
   const errors = [];
-  let handler = null;
+  // A real SignalK server dispatches to every still-registered handler, not
+  // just the latest — so a start() that leaks the previous subscription
+  // fires notifications twice. Track a list, and honour the unsubscribe
+  // function the plugin collects into `unsubs`, so plugin.stop() actually
+  // silences the old handler here the way it does in production.
+  let handlers = [];
   const api = {
     handled,
     errors,
-    // Feed a delta into whatever the plugin subscribed with.
-    emit: (values) => handler({ updates: [{ values }] }),
+    // Feed a delta into every subscribed handler.
+    emit: (values) => handlers.forEach((h) => h({ updates: [{ values }] })),
     handleMessage: (_id, msg) => handled.push(msg),
     error: (e) => errors.push(String(e)),
     debug: () => {},
     getSelfPath: () => ({ value: { latitude: 48.76, longitude: -123.05 } }),
     subscribeCalls: 0,
+    // Test-only hook: how many subscriptions are currently live. A start()
+    // that fails to clean up its predecessor leaves this at 2+.
+    get activeHandlerCount() { return handlers.length; },
     subscriptionmanager: {
-      subscribe: (_sub, _unsubs, _onErr, onDelta) => { handler = onDelta; api.subscribeCalls += 1; },
+      subscribe: (_sub, unsubs, _onErr, onDelta) => {
+        handlers.push(onDelta);
+        unsubs.push(() => { handlers = handlers.filter((h) => h !== onDelta); });
+        api.subscribeCalls += 1;
+      },
     },
   };
   return api;
@@ -511,14 +546,64 @@ test('a never-forwarded path does not emit a cleared envelope', async () => {
   assert.deepEqual(sent.mqtt, []);
 });
 
-test('the plugin never routes its own deliveryFailed alarm', async () => {
+test('hookBodyExtra of "{}" does not trip the startup warning (minor)', async () => {
+  const app = fakeApp();
+  startPlugin(app, {}, { hookBodyExtra: '{}' });
+  assert.equal(app.errors.some((e) => /is not a JSON object/.test(e)), false);
+});
+
+test('a malformed hookBodyExtra still trips the startup warning', async () => {
+  const app = fakeApp();
+  startPlugin(app, {}, { hookBodyExtra: 'not json{' });
+  assert.equal(app.errors.some((e) => /is not a JSON object/.test(e)), true);
+});
+
+test('calling start() twice without stop() still delivers exactly one siren (minor)', async () => {
+  const app = fakeApp();
+  const { plugin, sent } = startPlugin(app);
+  plugin.start({
+    minState: 'alert', coalesceSeconds: 10, topicPrefix: 'naturali/alerts',
+    mqttUrl: 'mqtt://localhost:1883', telegramBotToken: 't', telegramChatId: 'c',
+    hookUrl: 'http://h/agent', hookToken: 'k',
+  });
+  assert.equal(app.activeHandlerCount, 1);   // the first subscription was not left dangling
+  app.emit([{ path: 'notifications.navigation.anchor', value: { state: 'alarm', timestamp: 't', method: SOUND } }]);
+  await settle();
+  assert.equal(sent.telegram.length, 1);
+});
+
+test('the plugin never routes its own deliveryFailed alarm, but still publishes it to MQTT', async () => {
   const app = fakeApp();
   const { sent } = startPlugin(app);
   app.emit([{ path: 'notifications.notificationRouter.deliveryFailed.telegram', value: { state: 'alert', method: ['visual', 'sound'], timestamp: 't' } }]);
   await settle();
-  assert.deepEqual(sent.mqtt, []);
+  assert.equal(sent.mqtt.length, 1);   // Finding 1: MQTT is the only path to voice/dashboard
   assert.deepEqual(sent.telegram, []);
   assert.deepEqual(sent.hook, []);
+});
+
+test('the delivery-health alarm itself reaches MQTT (Finding 1)', async () => {
+  // The real server loops a published notification back through the
+  // subscription the plugin holds on notifications.* — fakeApp doesn't
+  // simulate that automatically, so replay what setDeliveryFailed emitted,
+  // the same way SignalK itself would deliver it back to onDelta.
+  const app = fakeApp();
+  const { sent } = startPlugin(app, { sendTelegram: async () => { throw new Error('down'); } }, { failureThreshold: 2 });
+  for (const p of ['a', 'b']) {
+    app.emit([{ path: `notifications.${p}`, value: { state: 'alarm', timestamp: 't', method: SOUND } }]);
+    await settle();
+  }
+  const raisedMsg = app.handled.find((m) =>
+    m.updates[0].values[0].path === 'notifications.notificationRouter.deliveryFailed.telegram'
+  );
+  app.emit(raisedMsg.updates[0].values);
+  await settle();
+
+  const healthPublishes = sent.mqtt.filter(([topic]) => topic.endsWith('notificationRouter.deliveryFailed.telegram'));
+  assert.equal(healthPublishes.length, 1);
+  // Never routed out the push lanes for its own alarm.
+  assert.equal(sent.telegram.filter((t) => /deliveryFailed/.test(t)).length, 0);
+  assert.equal(sent.hook.filter((h) => /deliveryFailed/.test(h)).length, 0);
 });
 
 test('a dead Telegram still lets the hook through, and vice versa', async () => {
@@ -579,6 +664,97 @@ test('a success after failures clears the deliveryFailed alarm', async () => {
   const events = app.handled.flatMap((m) => m.updates[0].values)
     .filter((v) => v.path === 'notifications.notificationRouter.deliveryFailed.telegram');
   assert.equal(events.at(-1).value.state, 'normal');
+});
+
+test('a throwing app.error does not produce an unhandled rejection, and later deliveries still work (Finding 5)', async () => {
+  const rejections = [];
+  const onRejection = (e) => rejections.push(e);
+  process.on('unhandledRejection', onRejection);
+  try {
+    const app = fakeApp();
+    app.error = () => { throw new Error('logging itself is broken'); };
+    let fail = true;
+    const delivered = [];
+    startPlugin(app, {
+      sendTelegram: async (text) => { if (fail) throw new Error('telegram down'); delivered.push(text); },
+    });
+
+    app.emit([{ path: 'notifications.a', value: { state: 'alarm', timestamp: 't', method: SOUND } }]);
+    await settle();
+    await settle();   // let a second microtask turn flush any unhandled rejection
+
+    fail = false;
+    app.emit([{ path: 'notifications.b', value: { state: 'alarm', timestamp: 't2', method: SOUND } }]);
+    await settle();
+    assert.equal(delivered.length, 1);   // the row that succeeded still got through
+  } finally {
+    process.off('unhandledRejection', onRejection);
+  }
+  assert.deepEqual(rejections, []);
+});
+
+test('an unreachable MQTT broker still records failures and raises deliveryFailed.mqtt (Finding 3)', async () => {
+  // mqtt.js only invokes the publish callback on PUBACK — while the broker is
+  // down the callback never fires, so without the connected-check the health
+  // counter would sit silent through the outage it exists to report.
+  const app = fakeApp();
+  startPlugin(
+    app,
+    { connectMqtt: () => ({ connected: false, publish: () => {}, end: () => {} }) },
+    { failureThreshold: 2 }
+  );
+  for (const p of ['a', 'b']) {
+    app.emit([{ path: `notifications.${p}`, value: { state: 'alarm', timestamp: 't', method: SOUND } }]);
+    await settle();
+  }
+  const raised = app.handled.flatMap((m) => m.updates[0].values)
+    .filter((v) => v.path === 'notifications.notificationRouter.deliveryFailed.mqtt');
+  assert.equal(raised.length, 1);
+  assert.equal(raised[0].value.state, 'alert');
+});
+
+test('a connected test double without a `connected` property is treated as connected', async () => {
+  // `connected === false` must be explicit — a test double or a client
+  // implementation that never sets the property should not be permanently
+  // treated as failed.
+  const app = fakeApp();
+  const { sent } = startPlugin(app);   // startPlugin's fake mqtt client has no `connected` field
+  app.emit([{ path: 'notifications.a', value: { state: 'alarm', timestamp: 't', method: SOUND } }]);
+  await settle();
+  const raised = app.handled.flatMap((m) => m.updates[0].values)
+    .filter((v) => v.path === 'notifications.notificationRouter.deliveryFailed.mqtt');
+  assert.equal(raised.length, 0);
+  assert.equal(sent.mqtt.length, 1);
+});
+
+test('a raised alarm survives a restart and still clears on recovery (Finding 2)', async () => {
+  const app = fakeApp();
+  let fail = true;
+  const { plugin } = startPlugin(
+    app,
+    { sendTelegram: async () => { if (fail) throw new Error('down'); } },
+    { failureThreshold: 1 }
+  );
+  app.emit([{ path: 'notifications.a', value: { state: 'alarm', timestamp: 't', method: SOUND } }]);
+  await settle();
+  const raisedBefore = app.handled.flatMap((m) => m.updates[0].values)
+    .filter((v) => v.path === 'notifications.notificationRouter.deliveryFailed.telegram');
+  assert.equal(raisedBefore.at(-1).value.state, 'alert');
+
+  plugin.stop();
+  plugin.start({
+    minState: 'alert', coalesceSeconds: 10, topicPrefix: 'naturali/alerts',
+    mqttUrl: 'mqtt://localhost:1883', telegramBotToken: 't', telegramChatId: 'c',
+    hookUrl: 'http://h/agent', hookToken: 'k', failureThreshold: 1,
+  });
+
+  fail = false;
+  app.emit([{ path: 'notifications.b', value: { state: 'alarm', timestamp: 't', method: SOUND } }]);
+  await settle();
+
+  const events = app.handled.flatMap((m) => m.updates[0].values)
+    .filter((v) => v.path === 'notifications.notificationRouter.deliveryFailed.telegram');
+  assert.equal(events.at(-1).value.state, 'normal');   // recorded even after a restart — `raised` was not wiped
 });
 
 test('a broken row does not abort the rest of the batch', async () => {
